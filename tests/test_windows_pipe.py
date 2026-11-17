@@ -16,7 +16,7 @@ pytestmark = pytest.mark.skipif(os.name != 'nt', reason='Windows pipe backend')
 def test_authenticated_pipe_is_only_an_allowlisted_gateway(tmp_path):
     root=tmp_path/'work';root.mkdir()
     state=tmp_path/'state';state.mkdir()
-    c=Commander(Policy(root=root,state=state,min_free_disk_bytes=0))
+    c=Commander(Policy(root=root,state=state,min_free_disk_bytes=0),allow_admin=True)
     pipe=r'\\.\pipe\JSCCommander_Test_'+uuid.uuid4().hex
     key=b'x'*32
     service=BrokerService(c,key,address=pipe)
@@ -34,3 +34,13 @@ def test_authenticated_pipe_is_only_an_allowlisted_gateway(tmp_path):
     assert not thread.is_alive()
     assert response['arbitrary_shell'] is False
     assert response['emergency_stop'] is False
+
+
+def test_production_rejects_elevated_windows_runner(tmp_path):
+    from jsc_local_commander.core import admin_mode, Denied
+    if not admin_mode():
+        pytest.skip('Non-elevated Windows runner')
+    workspace=tmp_path/'workspace';workspace.mkdir()
+    state=tmp_path/'state';state.mkdir()
+    with pytest.raises(Denied,match='Administrator process forbidden'):
+        Commander(Policy(root=workspace,state=state))

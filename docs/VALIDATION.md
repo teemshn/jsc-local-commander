@@ -19,3 +19,5 @@
 31–34: infinite request attempts, filesystem/SQLite exhaustion, service account isolation, backup/restore drill.
 
 The unit tests cover **some** of these behaviors and not all Win32 attack surfaces. Do not interpret a green CI job as 34/34 acceptance.
+
+Windows Actions runners may execute elevated. Isolated unit tests explicitly opt in to `allow_admin=True` for synthetic temporary paths; a separate Windows test asserts the production constructor **refuses** an elevated runner. This test-only override must never be used to start the real broker.

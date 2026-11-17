@@ -11,7 +11,7 @@ def env(tmp_path):
     root=tmp_path/'workspace'; state=tmp_path/'state'
     root.mkdir(); state.mkdir()
     target=root/'notes.txt';target.write_text('before\n',encoding='utf-8')
-    return Commander(Policy(root=root,state=state,min_free_disk_bytes=0)), target
+    return Commander(Policy(root=root,state=state,min_free_disk_bytes=0),allow_admin=True), target
 
 def digest(content):return hashlib.sha256(content).hexdigest()
 
@@ -119,7 +119,7 @@ def test_no_unsafe_code_edit(env):
 def test_emergency_stop_survives_reopen(env):
     c,p=env
     c.emergency(True)
-    reopened=Commander(c.p)
+    reopened=Commander(c.p,allow_admin=True)
     assert reopened.status()['emergency_stop']
     with pytest.raises(Denied): reopened.list_workspace('restarted-task',str(p.parent))
 

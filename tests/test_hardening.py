@@ -15,7 +15,7 @@ def prepare(tmp_path):
     workspace = tmp_path/'work'; workspace.mkdir()
     state = tmp_path/'state'; state.mkdir()
     file = workspace/'notes.txt'; file.write_text('before\n', encoding='utf-8')
-    return Commander(Policy(root=workspace,state=state,min_free_disk_bytes=0)), file
+    return Commander(Policy(root=workspace,state=state,min_free_disk_bytes=0),allow_admin=True), file
 
 
 def digest(data): return hashlib.sha256(data).hexdigest()
@@ -73,7 +73,7 @@ def test_crash_recovery_latches_emergency(tmp_path):
     plan=c.plan_edit('crash',str(p),digest(b'before\n'),'after\n')
     with c._db() as db:
         db.execute("UPDATE plans SET status='applying',idem='crash-key' WHERE id=?",(plan['plan_id'],))
-    reopened=Commander(c.p)
+    reopened=Commander(c.p,allow_admin=True)
     assert reopened.status()['emergency_stop']
     assert reopened.status()['unresolved_writes']==1
     with pytest.raises(Denied): reopened.read_text('another',str(p))
