@@ -17,13 +17,14 @@ from contextlib import contextmanager
 from pathlib import Path
 
 MAX_TEXT = 256 * 1024
+MAX_BACKUPS = 512 * 1024 * 1024
 SAFE_EXTENSIONS = frozenset({'.txt', '.md', '.csv'})
 SENSITIVE_PARTS = frozenset({'.ssh', '.aws', '.gnupg', 'npki', 'appdata', 'programdata',
                              'windows', 'system32', 'syswow64', 'program files',
                              'program files (x86)', 'system volume information',
                              '.git', '.env', 'credentials', 'secrets', 'private'})
 WINDOWS_RESERVED = re.compile(r'^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)', re.I)
-SECRET_PATTERN = re.compile(r'(?im)^(\s*(?:api[_-]?key|secret|password|token|authorization)\s*[:=]\s*)[^\r\n]+')
+SECRET_PATTERN = re.compile(r'(?im)^([ \t]*[+-]?[ \t]*(?:api[_-]?key|secret|password|token|authorization)[ \t]*[:=][ \t]*)[^\r\n]+')
 PEM_PATTERN = re.compile(r'-----BEGIN [^-]+PRIVATE KEY-----.*?-----END [^-]+PRIVATE KEY-----', re.S)
 
 class Denied(Exception):
@@ -76,6 +77,8 @@ class Policy:
         state = Path(data['state'])
         if not root.is_absolute() or not state.is_absolute() or not root.is_dir():
             raise Denied('Invalid workspace or state configuration')
+        if any(part.casefold() in SENSITIVE_PARTS for part in root.parts):
+            raise Denied('Workspace cannot be placed under a protected system location')
         if os.path.commonpath([os.path.realpath(root), os.path.realpath(state)]).casefold() == os.path.realpath(root).casefold():
             raise Denied('State may not be inside workspace')
         return cls(root=root, state=state)
@@ -92,8 +95,9 @@ class Commander:
             raise Denied('Workspace/state directory missing')
         if self.root == self.state or self.root in self.state.parents or self.state in self.root.parents:
             raise Denied('Workspace and state must be separate')
-        if self.root.is_symlink() or self.state.is_symlink():
-            raise Denied('Unsafe root directory')
+        for d in (self.root, self.state):
+            if d.is_symlink() or (os.name == 'nt' and (getattr(d.lstat(), 'st_file_attributes', 0) & 0x400)):
+                raise Denied('Unsafe reparse root directory')
         if os.name == 'nt' and admin_mode() and not allow_admin:
             raise Denied('Administrator process forbidden')
         self.db = self.state / 'ledger.sqlite3'
@@ -173,8 +177,6 @@ class Commander:
         p = Path(path)
         if not p.is_absolute() or '..' in p.parts:
             raise Denied('Absolute path inside workspace required; traversal forbidden')
-        if any(part.casefold() in SENSITIVE_PARTS for part in p.parts):
-            raise Denied('Sensitive path')
         if os.name == 'nt':
             if ':' in str(p)[2:]:
                 raise Denied('Alternate streams are forbidden')
@@ -187,6 +189,8 @@ class Commander:
             if os.name != 'nt' or os.path.commonpath([str(self.root), str(p)]).casefold() != str(self.root).casefold():
                 raise Denied('Path outside workspace')
             rel = Path(os.path.relpath(p, self.root))
+        if any(part.casefold() in SENSITIVE_PARTS for part in rel.parts):
+            raise Denied('Sensitive path')
         cur = self.root
         for part in rel.parts:
             cur = cur / part
@@ -290,6 +294,10 @@ class Commander:
         updated = replacement.encode('utf-8')
         plan_id = str(uuid.uuid4())
         with self._db() as c:
+            c.execute('DELETE FROM plans WHERE created<?', (time.time()-86400,))
+            pending_count=c.execute("SELECT COUNT(*) FROM plans WHERE status='pending'").fetchone()[0]
+            if pending_count>=50:
+                raise Denied('Too many pending plans')
             c.execute('INSERT INTO plans VALUES(?,?,?,?,?,?,?,?,?)',
                       (plan_id,task,str(p),sha(old),updated,time.time(),'pending',None,None))
             self._audit(c,'plan',str(p),'PENDING')
@@ -329,6 +337,11 @@ class Commander:
                 raise Denied('Disk free-space safety threshold not met')
             backups=self.state/'backups'
             backups.mkdir(exist_ok=True)
+            backup_total=0
+            for old_backup in backups.glob('*.bak'):
+                backup_total += old_backup.stat().st_size
+                if backup_total + len(data) > MAX_BACKUPS:
+                    raise Denied('Protected backup quota exhausted')
             backup=backups/(plan_id+'.bak')
             with open(backup,'xb') as f:
                 f.write(data);f.flush();os.fsync(f.fileno())
@@ -340,7 +353,20 @@ class Commander:
                 # Revalidate before replacement; still requires dedicated OS ACL isolation for strong race protection.
                 if self._path(path)!=p or sha(p.read_bytes())!=expected or p.stat().st_nlink!=1:
                     raise Denied('Target changed during write')
-                os.replace(temp,p)
+                if os.name == 'nt':
+                    # ReplaceFileW keeps original security ACLs/metadata instead of inheriting
+                    # the temporary file ACL, unlike a raw rename.
+                    import ctypes
+                    from ctypes import wintypes
+                    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+                    replace = kernel.ReplaceFileW
+                    replace.argtypes = [wintypes.LPCWSTR,wintypes.LPCWSTR,wintypes.LPCWSTR,
+                                        wintypes.DWORD,wintypes.LPVOID,wintypes.LPVOID]
+                    replace.restype = wintypes.BOOL
+                    if not replace(str(p),str(temp),None,0,None,None):
+                        raise Denied('Windows atomic replacement failed: '+str(ctypes.get_last_error()))
+                else:
+                    os.replace(temp,p)
                 if sha(p.read_bytes())!=sha(content):
                     raise Denied('Post-write verification failed; manual restore required')
             finally:

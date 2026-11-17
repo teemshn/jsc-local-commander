@@ -116,3 +116,60 @@ def test_no_unsafe_code_edit(env):
     c,p=env
     script=p.parent/'deploy.sh';script.write_text('echo danger')
     with pytest.raises(Denied):c.plan_edit('task-code',str(script),digest(b'echo danger'),'new')
+
+def test_emergency_stop_survives_reopen(env):
+    c,p=env
+    c.emergency(True)
+    reopened=Commander(c.p)
+    assert reopened.status()['emergency_stop']
+    with pytest.raises(Denied): reopened.list_workspace('restarted-task',str(p.parent))
+
+
+def test_sensitive_subfolder_denied(env):
+    c,p=env
+    secret=p.parent/'.ssh';secret.mkdir()
+    (secret/'id_rsa.txt').write_text('private')
+    with pytest.raises(Denied):c.read_text('sensitive-task',str(secret/'id_rsa.txt'))
+    assert '.ssh' not in [x['name'] for x in c.list_workspace('sensitive-task',str(p.parent))['files']]
+
+
+def test_invalid_task_identifiers_rejected(env):
+    c,p=env
+    for task in ('','../other','a b','x'*65):
+        with pytest.raises(Denied):c.read_text(task,str(p))
+
+
+def test_plan_result_does_not_disclose_original_secret(env):
+    c,p=env
+    p.write_text('PASSWORD=secret123\n')
+    plan=c.plan_edit('safe-preview',str(p),digest(b'PASSWORD=secret123\n'),'PASSWORD=changed123\n')
+    assert 'secret123' not in plan['diff']
+    assert 'changed123' not in plan['diff']
+
+
+def test_writes_hour_budget_persists_across_tasks(env):
+    c,p=env
+    object.__setattr__(c,'p',Policy(root=c.root,state=c.state,min_free_disk_bytes=0,max_writes_hour=2))
+    for i in range(2):
+        expected=digest(p.read_bytes())
+        plan=c.plan_edit(f'mut-{i}',str(p),expected,f'new{i}\n')
+        c.apply_edit(f'mut-{i}',plan['plan_id'],f'change-request-{i:04}')
+    plan=c.plan_edit('mut-3',str(p),digest(p.read_bytes()),'final')
+    with pytest.raises(Denied):c.apply_edit('mut-3',plan['plan_id'],'change-request-0003')
+
+
+def test_audit_contains_only_hash_not_plaintext_path(env):
+    c,p=env
+    c.plan_edit('audit-01',str(p),digest(b'before\n'),'after')
+    events=c.audits('audit-01')
+    assert events[0]['action']=='plan'
+    assert str(p) not in str(events)
+
+
+def test_unsupported_extension_and_nested_symlink_denied(env,tmp_path):
+    c,p=env
+    target=tmp_path/'outside';target.mkdir()
+    nested=p.parent/'linked'
+    try:nested.symlink_to(target,target_is_directory=True)
+    except OSError:pytest.skip('No symlink permission')
+    with pytest.raises(Denied):c.search_files('linked-task',str(nested))
