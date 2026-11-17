@@ -1,0 +1,56 @@
+# 문서용 예시. 이 파일만으로 보안이 강제되지는 않습니다.
+# 실제 경로는 JSCPC에서 관리자가 검증 후 지정. 설치 시 기본 정책은 DENY ALL.
+policy_version: 1
+mode: local_stdio_only
+default: deny
+identity:
+  require_standard_user: true
+  reject_administrator: true
+  reject_local_system: true
+  policy_owned_by_admin: true
+workspace:
+  allowed_roots:
+    - 'D:\JSC-AI-Workspace'   # 예시: 실제 존재 여부 미확인
+  follow_reparse_points_for_write: false
+  allow_unc: false
+  allow_device_paths: false
+  allow_alternate_data_streams: false
+  allow_multi_link_writes: false
+  deny_sensitive_user_data: true
+features:
+  raw_shell: false
+  elevation: false
+  delete_files: false
+  edit_services: false
+  docker_mutation: false
+  gui_automation: false
+  network_egress: false
+  remote_http: false
+limits:
+  per_call_seconds: 30
+  bounded_job_seconds: 120
+  task_seconds: 900
+  calls_per_task: 40
+  writes_per_task: 12
+  read_retries: 2
+  same_write_auto_repeats: 0
+  max_parallel_jobs: 2
+  max_parallel_writes: 1
+  files_modified_per_task: 20
+  bytes_written_per_task: 52428800
+  max_result_bytes: 262144
+  min_free_disk_bytes: 10737418240
+approval:
+  required_for_destructive: true
+  via_local_admin_cli_only: true
+  token_ttl_seconds: 120
+  bind_plan_hash: true
+  single_use: true
+logging:
+  redact_secrets: true
+  record_plan_and_content_hashes: true
+  append_only: true
+emergency:
+  fail_closed_on_policy_error: true
+  fail_closed_on_log_failure: true
+  persist_stop_state: true
