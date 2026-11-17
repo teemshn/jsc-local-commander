@@ -2,7 +2,7 @@
 
 **Status: SECURITY PREVIEW — DO NOT DEPLOY TO PRODUCTION JSCPC YET.**
 
-로컬 `stdio` MCP 서버로 **허용된 작업공간의 작은 일반 텍스트 파일만** 조회·검색·변경할 수 있습니다. 범용 PowerShell, 프로세스 실행, 관리자 권한 상승, 서비스 및 Docker 변경, 재귀 삭제, 외부 접속 기능은 **제공하지 않습니다**. 코드·설정·자격증명 파일은 수정할 수 없습니다.
+읽기 전용 시스템 진단과 로컬 `stdio` MCP 서버로 **허용된 작업공간의 작은 일반 텍스트 파일만** 조회·검색·변경할 수 있습니다. 범용 PowerShell, 프로세스 실행, 관리자 권한 상승, 서비스 및 Docker 변경, 재귀 삭제, 외부 접속 기능은 **제공하지 않습니다**. 코드·설정·자격증명 파일은 수정할 수 없습니다.
 
 ## 사용 전 주의
 
@@ -41,3 +41,7 @@ codex mcp add jsc-local-commander -- C:\path\to\repo\.venv\Scripts\python.exe -m
 - 경로 handle 기반 완전한 TOCTOU 방어
 
 안전성 시험: `docs/VALIDATION.md` 참조. **CI 통과만으로 운영환경 안전성이 검증되는 것은 아닙니다.**
+
+## 제공 도구 (v0.1)
+
+`get_status`, `get_system_info`, `diagnose_processes`, `diagnose_services`, `list_workspace`, `search_files`, `read_text`, `get_file_info`, `plan_edit`, `apply_edit`, `get_audit_events` (총 11개). 시스템/프로세스/서비스 진단은 조회 전용입니다.

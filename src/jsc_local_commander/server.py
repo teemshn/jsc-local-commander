@@ -27,6 +27,21 @@ def get_status() -> dict:
     return invoke('status')
 
 @mcp.tool()
+def get_system_info(task_id: str) -> dict:
+    """Read-only CPU, RAM, OS and workspace disk capacity."""
+    return invoke('system_info',task_id)
+
+@mcp.tool()
+def diagnose_processes(task_id: str, name_fragment: str='', max_results: int=30) -> dict:
+    """Read-only process PID/name/status; never executes commands."""
+    return invoke('diagnose_processes',task_id,name_fragment,max_results)
+
+@mcp.tool()
+def diagnose_services(task_id: str, name_fragment: str='', max_results: int=30) -> dict:
+    """Read-only Windows service name/status (cannot stop services)."""
+    return invoke('diagnose_services',task_id,name_fragment,max_results)
+
+@mcp.tool()
 def list_workspace(task_id: str, path: str, max_results: int=100) -> dict:
     """List a configured workspace directory; never follows links."""
     return invoke('list_workspace',task_id,path,max_results)

@@ -2,7 +2,7 @@
 
 ## 현재 구현
 
-- MCP stdio 8개 도구 (`get_status`, `list_workspace`, `search_files`, `read_text`, `get_file_info`, `plan_edit`, `apply_edit`, `get_audit_events`)
+- MCP stdio 11개 도구 (기존 8개에 `get_system_info`, `diagnose_processes`, `diagnose_services` 추가)
 - Windows 관리자 권한 실행 거부, 설정 미존재 시 fail closed
 - 지정 작업폴더만 접근, 민감 경로/파일 종류 차단, 링크 차단, 해시 비교, 하드링크 쓰기 차단
 - SQLite 영속 호출 예산(작업별·시간당), 변경 계획 TTL/중복 처리

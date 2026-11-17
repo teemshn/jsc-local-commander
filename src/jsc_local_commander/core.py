@@ -217,6 +217,57 @@ class Commander:
                 'workspace': str(self.root), 'arbitrary_shell': False,
                 'deletion': False, 'service_mutation': False}
 
+    def system_info(self, task: str):
+        """Read-only host health snapshot; never exposes environment variables or secrets."""
+        self._charge(task, 'read')
+        import platform
+        import psutil
+        ram = psutil.virtual_memory()
+        disk = shutil.disk_usage(self.root)
+        return {'os': platform.system(), 'release': platform.release(),
+                'cpu_cores': os.cpu_count(), 'memory_total': ram.total,
+                'memory_available': ram.available, 'workspace_disk_free': disk.free}
+
+    def diagnose_processes(self, task: str, name_fragment: str = '', max_results: int = 30):
+        """Read-only PID/name/status; no command line or arguments disclosure."""
+        self._charge(task, 'read')
+        import psutil
+        term = name_fragment.strip().casefold()
+        if len(term)>32: raise Denied('Filter too long')
+        limit = max(1, min(int(max_results), 50))
+        items=[]
+        deadline = time.monotonic()+2
+        for proc in psutil.process_iter(attrs=['pid','name','status'],ad_value=None):
+            if len(items)>=limit or time.monotonic()>deadline:break
+            try:
+                data=proc.info
+                name=data.get('name') or ''
+                if term and term not in name.casefold(): continue
+                items.append({'pid':data['pid'],'name':name[:100],'status':data.get('status')})
+            except (psutil.NoSuchProcess,psutil.AccessDenied,psutil.ZombieProcess):
+                continue
+        return {'processes':items,'truncated':len(items)>=limit}
+
+    def diagnose_services(self, task: str, name_fragment: str = '', max_results: int = 30):
+        """Windows services status only; this code cannot start or stop a service."""
+        self._charge(task, 'read')
+        if os.name!='nt':raise Denied('Windows-only service diagnostics')
+        import psutil
+        term=name_fragment.strip().casefold()
+        if len(term)>32:raise Denied('Filter too long')
+        limit=max(1,min(int(max_results),50))
+        items=[]
+        deadline=time.monotonic()+2
+        for service in psutil.win_service_iter():
+            if len(items)>=limit or time.monotonic()>deadline:break
+            try:
+                name=service.name()
+                if term and term not in name.casefold():continue
+                items.append({'name':name[:100],'status':service.status()})
+            except (OSError,psutil.AccessDenied):
+                continue
+        return {'services':items,'truncated':len(items)>=limit}
+
     def list_workspace(self, task: str, path: str, max_results: int = 100):
         self._charge(task, 'read')
         p = self._path(path)

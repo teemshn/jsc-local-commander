@@ -7,7 +7,7 @@ name = "jsc-local-commander"
 version = "0.1.0"
 description = "Local-only fail-closed Windows MCP workspace assistant (restricted preview)"
 requires-python = ">=3.11"
-dependencies = ["mcp>=2.3,<3"]
+dependencies = ["mcp>=2.3,<3", "psutil>=6,<9"]
 
 [project.optional-dependencies]
 test = ["pytest>=8,<10"]

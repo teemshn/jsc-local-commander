@@ -173,3 +173,31 @@ def test_unsupported_extension_and_nested_symlink_denied(env,tmp_path):
     try:nested.symlink_to(target,target_is_directory=True)
     except OSError:pytest.skip('No symlink permission')
     with pytest.raises(Denied):c.search_files('linked-task',str(nested))
+
+
+def test_system_health_read_only(env):
+    c,p=env
+    info=c.system_info('health-task')
+    assert info['cpu_cores']>=1
+    assert info['workspace_disk_free']>0
+    assert info['memory_available']>0
+
+
+def test_process_diagnostics_only_minimal_fields(env):
+    c,p=env
+    result=c.diagnose_processes('process-task',max_results=2)
+    assert len(result['processes'])<=2
+    for process in result['processes']:
+        assert set(process)<= {'pid','name','status'}
+        assert not any(k in process for k in ('cmdline','environ','cwd'))
+
+
+def test_service_diagnostics_is_windows_only(env):
+    c,p=env
+    if os.name!='nt':
+        with pytest.raises(Denied):c.diagnose_services('service-task')
+    else:
+        result=c.diagnose_services('service-task',max_results=5)
+        assert len(result['services'])<=5
+        for service in result['services']:
+            assert set(service)=={'name','status'}
