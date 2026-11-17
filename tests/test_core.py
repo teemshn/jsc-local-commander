@@ -140,7 +140,7 @@ def test_invalid_task_identifiers_rejected(env):
 
 def test_plan_result_does_not_disclose_original_secret(env):
     c,p=env
-    p.write_text('PASSWORD=secret123\n')
+    p.write_bytes(b'PASSWORD=secret123\n')
     plan=c.plan_edit('safe-preview',str(p),digest(b'PASSWORD=secret123\n'),'PASSWORD=changed123\n')
     assert 'secret123' not in plan['diff']
     assert 'changed123' not in plan['diff']

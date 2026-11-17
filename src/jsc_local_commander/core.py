@@ -329,7 +329,7 @@ class Commander:
             e = c.execute("SELECT value FROM settings WHERE name='emergency'").fetchone()
         with self._db() as c:
             unresolved = c.execute("SELECT COUNT(*) FROM plans WHERE status='applying'").fetchone()[0]
-        return {'service': 'JSC Local Commander', 'mode': 'local-stdio',
+        return {'service': 'JSC Local Commander', 'mode': 'isolated-local-broker',
                 'unresolved_writes': unresolved,
                 'emergency_stop': bool(e and e[0] != '0'),
                 'workspace': str(self.root), 'arbitrary_shell': False,

@@ -24,3 +24,5 @@
 - GitHub Windows hosted runner executes as `runneradmin`. Synthetic temp-directory tests now pass `allow_admin=True`, while production broker construction still refuses elevation.
 - Windows `Path.write_text()` default newline translation makes fixture SHA differ from LF-byte fixtures. Tests now use literal bytes for deterministic SHA-256 expectations, without weakening real file hash checks.
 - Added independent policy validation denying whole drive roots, `Users`, `Windows`, `ProgramData`, `Recovery`, UNC and removable/network drives. This is layered on top of NTFS permissions, not an OS sandbox.
+
+- The stdio gateway now explicitly rejects elevated Windows execution. An administrator may use the offline `doctor` command but cannot run the MCP gateway as elevated.

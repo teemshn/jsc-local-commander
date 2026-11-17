@@ -18,7 +18,8 @@ def main():
             from .ipc import BrokerService
             BrokerService().serve_forever()
         elif args.command=='doctor':
-            print(json.dumps(Commander(Policy.load()).status(),indent=2))
+            elevated = admin_mode()
+            print(json.dumps(Commander(Policy.load(allow_admin=elevated), allow_admin=elevated).status(), indent=2))
         elif args.command in ('review-recovery','reconcile-recovery'):
             if not admin_mode():
                 raise Denied('Administrator CLI required')

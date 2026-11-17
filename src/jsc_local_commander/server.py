@@ -2,7 +2,7 @@
 from __future__ import annotations
 import json
 from mcp.server import MCPServer
-from .core import Denied
+from .core import Denied, admin_mode
 from .ipc import BrokerClient
 
 mcp = MCPServer('JSC Local Commander (split broker v0.2)')
@@ -10,6 +10,8 @@ _client = None
 
 def get_client():
     global _client
+    if admin_mode():
+        raise Denied('Gateway refuses elevated Windows processes')
     if _client is None:
         _client = BrokerClient()
     return _client
