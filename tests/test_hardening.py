@@ -14,7 +14,7 @@ from jsc_local_commander.ipc import dispatch, TOOLS, BrokerClient, MAX_REQUEST_B
 def prepare(tmp_path):
     workspace = tmp_path/'work'; workspace.mkdir()
     state = tmp_path/'state'; state.mkdir()
-    file = workspace/'notes.txt'; file.write_text('before\n', encoding='utf-8')
+    file = workspace/'notes.txt'; file.write_bytes(b'before\n')
     return Commander(Policy(root=workspace,state=state,min_free_disk_bytes=0),allow_admin=True), file
 
 
@@ -111,7 +111,7 @@ def test_recovery_applied_requires_verified_backup(tmp_path):
     plan=c.plan_edit('crash4',str(p),digest(b'before\n'),'after\n')
     with c._db() as db:
         db.execute("UPDATE plans SET status='applying',idem='crash-key' WHERE id=?",(plan['plan_id'],))
-    p.write_text('after\n')
+    p.write_bytes(b'after\n')
     c.emergency(True)
     with pytest.raises(Denied,match='backup'):
         c.reconcile_recovery(plan['plan_id'],'applied')
@@ -154,3 +154,15 @@ def test_ordinary_edit_verified(tmp_path):
 def test_cli_importable():
     from jsc_local_commander.__main__ import main
     assert callable(main)
+
+
+def test_windows_policy_rejects_drive_roots_user_and_system_locations():
+    from jsc_local_commander.core import validate_windows_policy_paths
+    state=r'C:\ProgramData\JSCCommander\State'
+    validate_windows_policy_paths(r'D:\JSC-AI-Workspace',state)
+    for bad in ('C:\\', 'D:\\',r'C:\Windows\Temp',r'C:\Users\Public\Workspace',
+                r'C:\ProgramData\AI',r'C:\Recovery\AI',r'C:\$Recycle.Bin\stuff',
+                r'\\server\share\work',r'D:\work\..\Windows',r'D:/workspace'):
+        with pytest.raises(Denied): validate_windows_policy_paths(bad,state)
+    with pytest.raises(Denied):
+        validate_windows_policy_paths(r'D:\Work',r'C:\Users\Public\State')

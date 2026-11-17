@@ -29,7 +29,7 @@ There is deliberately **no shell**, subprocess execution, process-kill, Windows-
 
 ## Security properties
 
-- Workspace-only extension allowlist: `.txt`, `.md`, `.csv`. Sensitive names, credential directories, UNC/device prefixes, links/junctions and hard-linked *write targets* are rejected.
+- Workspace restricted to a local fixed drive subdirectory (never a whole drive root, Windows or user-profile directory); extension allowlist: `.txt`, `.md`, `.csv`. Sensitive names, credential directories, UNC/device prefixes, links/junctions and hard-linked *write targets* are rejected.
 - 256 KiB maximum read/write file size, with bounded FD reads and file identity checks (not a fully race-free Windows path API).
 - Deny-by-default Windows start-up checks: refuse elevated broker and missing/locally writable policy or code location.
 - SHA-256 check, redacted preview, durable `applying` intent, original backup, atomic replacement, post-replacement SHA verification, idempotent receipt.

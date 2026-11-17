@@ -10,7 +10,7 @@ from jsc_local_commander.core import Commander, Denied, Policy
 def env(tmp_path):
     root=tmp_path/'workspace'; state=tmp_path/'state'
     root.mkdir(); state.mkdir()
-    target=root/'notes.txt';target.write_text('before\n',encoding='utf-8')
+    target=root/'notes.txt';target.write_bytes(b'before\n')
     return Commander(Policy(root=root,state=state,min_free_disk_bytes=0),allow_admin=True), target
 
 def digest(content):return hashlib.sha256(content).hexdigest()

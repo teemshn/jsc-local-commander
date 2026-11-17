@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import stat
 import tempfile
+import ntpath
 import time
 import uuid
 from dataclasses import dataclass
@@ -22,7 +23,8 @@ SAFE_EXTENSIONS = frozenset({'.txt', '.md', '.csv'})
 # Deny high-risk names even when their file extension looks innocuous.
 SENSITIVE_NAME = re.compile(r'(?i)(?:^|[._-])(?:env|secret|secrets|token|tokens|password|passwd|credential|credentials|private|id_rsa|id_ed25519|npki|apikey|api_key)(?:[._-]|$)')
 SENSITIVE_PARTS = frozenset({'.ssh', '.aws', '.gnupg', 'npki', 'appdata', 'programdata',
-                             'windows', 'system32', 'syswow64', 'program files',
+                             'windows', 'users', 'recovery', '$recycle.bin', 'boot', 'efi',
+                             'perflogs', 'system32', 'syswow64', 'program files',
                              'program files (x86)', 'system volume information',
                              '.git', '.env', 'credentials', 'secrets', 'private'})
 WINDOWS_RESERVED = re.compile(r'^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)', re.I)
@@ -110,6 +112,37 @@ def _require_windows_protected_ancestors(path: Path):
 
 
 
+def validate_windows_policy_paths(workspace: str, state: str) -> None:
+    """Lexical validation independent of platform; call again on resolved paths."""
+    if not isinstance(workspace,str) or not isinstance(state,str):
+        raise Denied('Invalid policy paths')
+    for path in (workspace,state):
+        if (not ntpath.isabs(path) or path.startswith(('\\\\','//')) or
+                '/' in path or '..' in path.split('\\') or
+                ntpath.normcase(ntpath.normpath(path)) != ntpath.normcase(path)):
+            raise Denied('Policy must use a canonical local Windows path')
+    drive,tail = ntpath.splitdrive(workspace)
+    components = [part.casefold() for part in tail.split('\\') if part]
+    if (not drive or len(components) < 1 or
+            any(comp in SENSITIVE_PARTS or SENSITIVE_NAME.search(comp) for comp in components)):
+        raise Denied('Workspace may not be a drive root or system/user directory')
+    if ntpath.normcase(state) != ntpath.normcase(r'C:\ProgramData\JSCCommander\State'):
+        raise Denied('State must use the protected administrator-defined location')
+    if ntpath.normcase(workspace).startswith(ntpath.normcase(state)+'\\'):
+        raise Denied('Workspace cannot be under state')
+
+
+def _windows_require_fixed_drive(path: Path) -> None:
+    if os.name != 'nt':
+        return
+    import ctypes
+    # DRIVE_FIXED = 3. A mapped/network or removable drive may hang or be
+    # substituted by remote actors, and is not a supported safe workspace.
+    root = str(path.drive) + '\\'
+    if ctypes.windll.kernel32.GetDriveTypeW(root) != 3:
+        raise Denied('Policy directories must reside on local fixed drives')
+
+
 @dataclass(frozen=True)
 class Policy:
     root: Path
@@ -144,10 +177,14 @@ class Policy:
         data = json.loads(cfg.read_text(encoding='utf-8'))
         if set(data) != {'workspace', 'state'}:
             raise Denied('Unexpected policy keys')
+        validate_windows_policy_paths(data['workspace'],data['state'])
         root = Path(data['workspace'])
         state = Path(data['state'])
         if not root.is_absolute() or not state.is_absolute() or not root.is_dir():
             raise Denied('Invalid workspace or state configuration')
+        _windows_require_fixed_drive(root)
+        _windows_require_fixed_drive(state)
+        validate_windows_policy_paths(str(root.resolve(strict=True)), str(state.resolve(strict=True)))
         if any(part.casefold() in SENSITIVE_PARTS for part in root.parts):
             raise Denied('Workspace cannot be placed under a protected system location')
         if os.path.commonpath([os.path.realpath(root), os.path.realpath(state)]).casefold() == os.path.realpath(root).casefold():
