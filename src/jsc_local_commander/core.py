@@ -46,6 +46,33 @@ def admin_mode() -> bool:
     return bool(ctypes.windll.shell32.IsUserAnAdmin())
 
 
+def _require_windows_readonly(path: Path, *, directory: bool = False) -> None:
+    """Reject a policy/code path if this caller can write it (not a full DACL audit)."""
+    if os.name != 'nt':
+        return
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    creator = kernel.CreateFileW
+    creator.argtypes = [wintypes.LPCWSTR,wintypes.DWORD,wintypes.DWORD,wintypes.LPVOID,
+                        wintypes.DWORD,wintypes.DWORD,wintypes.HANDLE]
+    creator.restype = wintypes.HANDLE
+    closer = kernel.CloseHandle
+    closer.argtypes = [wintypes.HANDLE]
+    closer.restype = wintypes.BOOL
+    # FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY for directories; GENERIC_WRITE for a file.
+    access = 0x00000006 if directory else 0x40000000
+    flags = 0x02000000 if directory else 0
+    handle = creator(str(path), access, 0x00000007, None, 3, flags, None)
+    invalid = ctypes.c_void_p(-1).value
+    value = ctypes.cast(handle, ctypes.c_void_p).value
+    if value is not None and value != invalid:
+        closer(handle)
+        raise Denied('Unsafe writable policy/code location')
+    if ctypes.get_last_error() != 5:  # ERROR_ACCESS_DENIED
+        raise Denied('Could not prove policy/code path is write-protected')
+
+
 @dataclass(frozen=True)
 class Policy:
     root: Path
@@ -69,7 +96,12 @@ class Policy:
         cfg = base / 'policy.json'
         if not cfg.is_file() or cfg.is_symlink():
             raise Denied('Missing administrator-managed policy.json; fail closed')
-        # Installation MUST protect this file with NTFS ACLs. See SECURITY.md.
+        # This rejects commonly unsafe ACL setups, but is not a complete DACL audit.
+        if not (allow_admin and admin_mode()):
+            _require_windows_readonly(cfg)
+            _require_windows_readonly(cfg.parent, directory=True)
+            _require_windows_readonly(Path(__file__).resolve())
+            _require_windows_readonly(Path(__file__).resolve().parent, directory=True)
         data = json.loads(cfg.read_text(encoding='utf-8'))
         if set(data) != {'workspace', 'state'}:
             raise Denied('Unexpected policy keys')

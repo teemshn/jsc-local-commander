@@ -45,3 +45,5 @@ codex mcp add jsc-local-commander -- C:\path\to\repo\.venv\Scripts\python.exe -m
 ## 제공 도구 (v0.1)
 
 `get_status`, `get_system_info`, `diagnose_processes`, `diagnose_services`, `list_workspace`, `search_files`, `read_text`, `get_file_info`, `plan_edit`, `apply_edit`, `get_audit_events` (총 11개). 시스템/프로세스/서비스 진단은 조회 전용입니다.
+
+Windows 운영 경계: 시작 시 정책 파일·설치된 코드 및 상위 폴더가 작업 계정에서 쓰기 불가인지 Win32 API로 검사합니다. 이 검사는 전체 DACL 정밀 감사의 대체가 아니며, 설치 계정 ACL의 독립 검증이 추가로 필요합니다.

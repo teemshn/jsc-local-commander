@@ -11,3 +11,5 @@ This is a security preview, **not a Windows sandbox**. No security guarantees wi
 - Do not run on JSCPC production until all Windows-specific checks, multi-process races, emergency-stop permissions and restore drills are validated.
 
 Report security issues privately; do not open public issues containing credentials or exploit details.
+
+Startup uses Win32 CreateFile write-access probes for config/code paths; these checks are defense-in-depth, not an exhaustive ACL audit.
