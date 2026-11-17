@@ -19,6 +19,8 @@ from pathlib import Path
 MAX_TEXT = 256 * 1024
 MAX_BACKUPS = 512 * 1024 * 1024
 SAFE_EXTENSIONS = frozenset({'.txt', '.md', '.csv'})
+# Deny high-risk names even when their file extension looks innocuous.
+SENSITIVE_NAME = re.compile(r'(?i)(?:^|[._-])(?:env|secret|secrets|token|tokens|password|passwd|credential|credentials|private|id_rsa|id_ed25519|npki|apikey|api_key)(?:[._-]|$)')
 SENSITIVE_PARTS = frozenset({'.ssh', '.aws', '.gnupg', 'npki', 'appdata', 'programdata',
                              'windows', 'system32', 'syswow64', 'program files',
                              'program files (x86)', 'system volume information',
@@ -47,30 +49,65 @@ def admin_mode() -> bool:
 
 
 def _require_windows_readonly(path: Path, *, directory: bool = False) -> None:
-    """Reject a policy/code path if this caller can write it (not a full DACL audit)."""
+    """Conservative effective-access probe for the current token.
+
+    An attempted combined mask is insufficient: an ACL may deny one bit but
+    grant another. Probe each dangerous permission separately; fail on any
+    unrecognised Win32 error. Still NOT a complete DACL/SID security audit.
+    """
     if os.name != 'nt':
         return
     import ctypes
     from ctypes import wintypes
     kernel = ctypes.WinDLL('kernel32', use_last_error=True)
     creator = kernel.CreateFileW
-    creator.argtypes = [wintypes.LPCWSTR,wintypes.DWORD,wintypes.DWORD,wintypes.LPVOID,
-                        wintypes.DWORD,wintypes.DWORD,wintypes.HANDLE]
+    creator.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                        wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
     creator.restype = wintypes.HANDLE
     closer = kernel.CloseHandle
     closer.argtypes = [wintypes.HANDLE]
     closer.restype = wintypes.BOOL
-    # FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY for directories; GENERIC_WRITE for a file.
-    access = 0x00000006 if directory else 0x40000000
-    flags = 0x02000000 if directory else 0
-    handle = creator(str(path), access, 0x00000007, None, 3, flags, None)
-    invalid = ctypes.c_void_p(-1).value
-    value = ctypes.cast(handle, ctypes.c_void_p).value
-    if value is not None and value != invalid:
-        closer(handle)
-        raise Denied('Unsafe writable policy/code location')
-    if ctypes.get_last_error() != 5:  # ERROR_ACCESS_DENIED
-        raise Denied('Could not prove policy/code path is write-protected')
+    flags = 0x02000000 if directory else 0  # FILE_FLAG_BACKUP_SEMANTICS
+    # WRITE_DATA/ADD_FILE, APPEND_DATA/ADD_SUBDIR, DELETE_CHILD,
+    # WRITE_ATTRIBUTES, DELETE, WRITE_DAC, WRITE_OWNER.
+    dangerous = [0x2, 0x4, 0x100, 0x10000, 0x40000, 0x80000]
+    if directory:
+        dangerous.append(0x40)
+    for bit in dangerous:
+        h = creator(str(path), bit, 0x7, None, 3, flags, None)
+        raw = ctypes.cast(h, ctypes.c_void_p).value
+        if raw is not None and raw != ctypes.c_void_p(-1).value:
+            closer(h)
+            raise Denied('Unsafe writable policy/code location')
+        if ctypes.get_last_error() != 5:  # ERROR_ACCESS_DENIED
+            raise Denied('Cannot prove policy/code path is protected')
+
+
+def _require_windows_protected_ancestors(path: Path):
+    """Reject rename/deletion or permission takeover on parent directories."""
+    if os.name != 'nt':
+        return
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    f = kernel.CreateFileW
+    f.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                  wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    f.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    for parent in path.parents:
+        if not parent.exists():
+            raise Denied('Unexpected missing protected ancestor')
+        for bit in (0x40, 0x10000, 0x40000, 0x80000):
+            h = f(str(parent),bit,0x7,None,3,0x02000000,None)
+            raw = ctypes.cast(h,ctypes.c_void_p).value
+            if raw is not None and raw != ctypes.c_void_p(-1).value:
+                kernel.CloseHandle(h)
+                raise Denied('Unsafe mutable ancestor of protected path')
+            if ctypes.get_last_error() != 5:
+                raise Denied('Cannot prove ancestor protections')
+
 
 
 @dataclass(frozen=True)
@@ -102,6 +139,8 @@ class Policy:
             _require_windows_readonly(cfg.parent, directory=True)
             _require_windows_readonly(Path(__file__).resolve())
             _require_windows_readonly(Path(__file__).resolve().parent, directory=True)
+            _require_windows_protected_ancestors(cfg)
+            _require_windows_protected_ancestors(Path(__file__).resolve())
         data = json.loads(cfg.read_text(encoding='utf-8'))
         if set(data) != {'workspace', 'state'}:
             raise Denied('Unexpected policy keys')
@@ -148,8 +187,15 @@ class Commander:
                   id INTEGER PRIMARY KEY, at REAL NOT NULL, action TEXT NOT NULL,
                   object_hash TEXT NOT NULL, outcome TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS ix_calls ON calls(actor, at);
+                CREATE UNIQUE INDEX IF NOT EXISTS ix_plans_idem ON plans(idem) WHERE idem IS NOT NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS ix_plans_active_target ON plans(path) WHERE status='applying';
             ''')
             c.execute("INSERT OR IGNORE INTO settings(name,value) VALUES ('emergency','0')")
+            # Crash-safe fail closed: if a prior write died mid-flight, no new work
+            # may start until an operator investigates and explicitly reconciles.
+            stuck = c.execute("SELECT COUNT(*) FROM plans WHERE status='applying'").fetchone()[0]
+            if stuck:
+                c.execute("UPDATE settings SET value='1' WHERE name='emergency'")
 
     @contextmanager
     def _db(self):
@@ -221,7 +267,7 @@ class Commander:
             if os.name != 'nt' or os.path.commonpath([str(self.root), str(p)]).casefold() != str(self.root).casefold():
                 raise Denied('Path outside workspace')
             rel = Path(os.path.relpath(p, self.root))
-        if any(part.casefold() in SENSITIVE_PARTS for part in rel.parts):
+        if any(part.casefold() in SENSITIVE_PARTS or SENSITIVE_NAME.search(part) for part in rel.parts):
             raise Denied('Sensitive path')
         cur = self.root
         for part in rel.parts:
@@ -244,7 +290,10 @@ class Commander:
     def status(self):
         with self._db() as c:
             e = c.execute("SELECT value FROM settings WHERE name='emergency'").fetchone()
+        with self._db() as c:
+            unresolved = c.execute("SELECT COUNT(*) FROM plans WHERE status='applying'").fetchone()[0]
         return {'service': 'JSC Local Commander', 'mode': 'local-stdio',
+                'unresolved_writes': unresolved,
                 'emergency_stop': bool(e and e[0] != '0'),
                 'workspace': str(self.root), 'arbitrary_shell': False,
                 'deletion': False, 'service_mutation': False}
@@ -346,12 +395,56 @@ class Commander:
                             break
         return {'paths':matches, 'scanned':scanned, 'truncated':bool(stack) or len(matches)>=lim or scanned>=3000}
 
+    def _read_bounded(self, p: Path, *, for_write: bool = False) -> bytes:
+        """Open and inspect an ordinary file; reject file swaps and oversize reads.
+
+        This is defense in depth, NOT a complete Windows TOCTOU or ACL boundary.
+        Protected NTFS ACLs and a dedicated OS identity are still mandatory.
+        """
+        self._path(str(p))
+        before = p.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise Denied('Not an ordinary file')
+        if before.st_size > self.p.max_file_bytes:
+            raise Denied('File too large')
+        if for_write and (before.st_nlink != 1 or before.st_mode & stat.S_IWUSR == 0):
+            raise Denied('Hardlinked/read-only target refused')
+        flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0)
+        fd = os.open(p, flags)
+        try:
+            actual = os.fstat(fd)
+            if (not stat.S_ISREG(actual.st_mode) or
+                actual.st_size > self.p.max_file_bytes or
+                (for_write and actual.st_nlink != 1) or
+                (actual.st_dev, actual.st_ino) != (before.st_dev, before.st_ino)):
+                raise Denied('File changed or unsafe after opening')
+            data = bytearray()
+            while len(data) <= self.p.max_file_bytes:
+                block = os.read(fd, min(65536, self.p.max_file_bytes + 1 - len(data)))
+                if not block:
+                    break
+                data.extend(block)
+            if len(data) > self.p.max_file_bytes:
+                raise Denied('File grew beyond size limit')
+            after = p.lstat()
+            if ((after.st_dev, after.st_ino) != (actual.st_dev, actual.st_ino) or
+                not stat.S_ISREG(after.st_mode) or
+                (for_write and after.st_nlink != 1)):
+                raise Denied('File replaced during inspection')
+            self._path(str(p))
+            return bytes(data)
+        finally:
+            os.close(fd)
+
     def read_text(self, task: str, path: str, start_line: int=1, max_lines: int=200):
         self._charge(task, 'read')
         p = self._path(path)
-        if not p.is_file() or p.suffix.casefold() not in SAFE_EXTENSIONS or p.stat().st_size>self.p.max_file_bytes:
-            raise Denied('Only small ordinary text files are readable')
-        lines = p.read_text(encoding='utf-8').splitlines()
+        if p.suffix.casefold() not in SAFE_EXTENSIONS:
+            raise Denied('Only approved text extensions are readable')
+        try:
+            lines = self._read_bounded(p).decode('utf-8').splitlines()
+        except UnicodeError as exc:
+            raise Denied('Invalid UTF-8 text') from exc
         start = max(1,int(start_line))-1
         count = max(1,min(200,int(max_lines)))
         text='\n'.join(lines[start:start+count])
@@ -360,19 +453,22 @@ class Commander:
     def get_file_info(self, task: str, path: str):
         self._charge(task, 'read')
         p = self._path(path)
-        if not p.is_file() or p.suffix.casefold() not in SAFE_EXTENSIONS or p.stat().st_size>self.p.max_file_bytes:
-            raise Denied('Unsupported file type or size')
-        return {'bytes':p.stat().st_size,'sha256':sha(p.read_bytes())}
+        if p.suffix.casefold() not in SAFE_EXTENSIONS:
+            raise Denied('Unsupported extension')
+        data = self._read_bounded(p)
+        return {'bytes':len(data),'sha256':sha(data)}
 
     def plan_edit(self, task: str, path: str, expected_sha256: str, replacement: str):
         self._charge(task, 'read')
         p = self._path(path)
-        if not p.is_file() or p.suffix.casefold() not in SAFE_EXTENSIONS:
-            raise Denied('Only existing safe text documents may be edited')
+        if p.suffix.casefold() not in SAFE_EXTENSIONS:
+            raise Denied('Only safe text documents may be edited')
+        if not isinstance(replacement, str):
+            raise Denied('Replacement must be text')
         if len(replacement.encode('utf-8')) > self.p.max_file_bytes:
             raise Denied('Replacement too large')
-        old = p.read_bytes()
-        if len(old)>self.p.max_file_bytes or sha(old) != expected_sha256:
+        old = self._read_bounded(p, for_write=True)
+        if sha(old) != expected_sha256:
             raise Denied('Expected hash does not match current file')
         updated = replacement.encode('utf-8')
         plan_id = str(uuid.uuid4())
@@ -392,7 +488,7 @@ class Commander:
 
     def apply_edit(self, task: str, plan_id: str, idempotency_key: str):
         self._charge(task, 'write')
-        if not re.fullmatch(r'[a-f0-9-]{36}', plan_id) or not re.fullmatch(r'[A-Za-z0-9_-]{8,64}',idempotency_key):
+        if not re.fullmatch(r'[a-f0-9-]{36}', plan_id) or not re.fullmatch(r'[A-Za-z0-9_-]{8,64}', idempotency_key):
             raise Denied('Invalid plan or idempotency key')
         with self._db() as c:
             c.execute('BEGIN IMMEDIATE')
@@ -400,67 +496,95 @@ class Commander:
                             (plan_id,)).fetchone()
             if not row or row[0] != task:
                 raise Denied('Plan absent or task mismatch')
-            old_task,path,expected,content,created,status,receipt,idem=row
-            if status=='applied':
+            _, path, expected, content, created, status, receipt, idem = row
+            if status == 'applied':
                 if idem == idempotency_key:
                     return json.loads(receipt)
                 raise Denied('Plan already executed; different key rejected')
-            if status!='pending' or time.time()-created>self.p.plan_ttl_seconds:
+            if status != 'pending' or time.time() - created > self.p.plan_ttl_seconds:
                 raise Denied('Plan expired or invalid')
-            p=self._path(path)
-            if not p.is_file() or p.suffix.casefold() not in SAFE_EXTENSIONS:
-                raise Denied('File no longer safe')
-            st=p.stat()
-            if st.st_nlink != 1:
-                raise Denied('Hardlinked files cannot be edited')
-            data=p.read_bytes()
-            if sha(data)!=expected:
+            if c.execute("SELECT 1 FROM plans WHERE idem=? AND id<>?", (idempotency_key, plan_id)).fetchone():
+                raise Denied('Idempotency key already assigned to another plan')
+            if c.execute("SELECT 1 FROM plans WHERE status='applying' LIMIT 1").fetchone():
+                raise Denied('Another write is active or unreconciled')
+            p = self._path(path)
+            if p.suffix.casefold() not in SAFE_EXTENSIONS:
+                raise Denied('File extension no longer safe')
+            if sha(self._read_bounded(p, for_write=True)) != expected:
                 raise Denied('Concurrent file modification detected')
-            if shutil.disk_usage(p.parent).free<self.p.min_free_disk_bytes:
+            if shutil.disk_usage(p.parent).free < self.p.min_free_disk_bytes:
                 raise Denied('Disk free-space safety threshold not met')
-            backups=self.state/'backups'
+            backups = self.state / 'backups'
             backups.mkdir(exist_ok=True)
-            backup_total=0
+            if backups.is_symlink():
+                raise Denied('Backup directory unsafe')
+            # Phase 1: commit a durable intent. Crash after this point latches
+            # emergency mode on next start rather than silently retrying.
+            c.execute("UPDATE plans SET status='applying',idem=? WHERE id=?", (idempotency_key, plan_id))
+            self._audit(c, 'apply_intent', path, 'PREPARED')
+            c.commit()
+        # There is intentionally NO automatic retry after this point.
+        backup = backups / (plan_id + '.bak')
+        temp = None
+        try:
+            data = self._read_bounded(p, for_write=True)
+            if sha(data) != expected:
+                raise Denied('Target changed after durable intent')
+            backup_total = 0
             for old_backup in backups.glob('*.bak'):
+                if old_backup.is_symlink():
+                    raise Denied('Backup link refused')
                 backup_total += old_backup.stat().st_size
                 if backup_total + len(data) > MAX_BACKUPS:
                     raise Denied('Protected backup quota exhausted')
-            backup=backups/(plan_id+'.bak')
-            with open(backup,'xb') as f:
-                f.write(data);f.flush();os.fsync(f.fileno())
-            temp=None
-            try:
-                with tempfile.NamedTemporaryFile(dir=p.parent,prefix='.jsc-',suffix='.tmp',delete=False) as f:
-                    temp=Path(f.name); f.write(content);f.flush();os.fsync(f.fileno())
-                os.chmod(temp,stat.S_IMODE(st.st_mode))
-                # Revalidate before replacement; still requires dedicated OS ACL isolation for strong race protection.
-                if self._path(path)!=p or sha(p.read_bytes())!=expected or p.stat().st_nlink!=1:
-                    raise Denied('Target changed during write')
+            with open(backup, 'xb') as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            with tempfile.NamedTemporaryFile(dir=p.parent, prefix='.jsc-', suffix='.tmp', delete=False) as f:
+                temp = Path(f.name)
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            # Revalidate the path and content as close to replacement as possible.
+            if sha(self._read_bounded(p, for_write=True)) != expected:
+                raise Denied('Target changed before replacement')
+            with self._db() as c:
+                c.execute('BEGIN IMMEDIATE')
+                emergency = c.execute("SELECT value FROM settings WHERE name='emergency'").fetchone()
+                if not emergency or emergency[0] != '0':
+                    raise Denied('Emergency stop active immediately before replacement')
+                st = p.stat()
+                os.chmod(temp, stat.S_IMODE(st.st_mode))
                 if os.name == 'nt':
-                    # ReplaceFileW keeps original security ACLs/metadata instead of inheriting
-                    # the temporary file ACL, unlike a raw rename.
                     import ctypes
                     from ctypes import wintypes
                     kernel = ctypes.WinDLL('kernel32', use_last_error=True)
                     replace = kernel.ReplaceFileW
-                    replace.argtypes = [wintypes.LPCWSTR,wintypes.LPCWSTR,wintypes.LPCWSTR,
-                                        wintypes.DWORD,wintypes.LPVOID,wintypes.LPVOID]
+                    replace.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                        wintypes.DWORD, wintypes.LPVOID, wintypes.LPVOID]
                     replace.restype = wintypes.BOOL
-                    if not replace(str(p),str(temp),None,0,None,None):
-                        raise Denied('Windows atomic replacement failed: '+str(ctypes.get_last_error()))
+                    if not replace(str(p), str(temp), None, 0, None, None):
+                        raise Denied('Windows atomic replacement failed; investigate pending intent')
                 else:
-                    os.replace(temp,p)
-                if sha(p.read_bytes())!=sha(content):
-                    raise Denied('Post-write verification failed; manual restore required')
-            finally:
-                if temp is not None and temp.exists():
-                    temp.unlink()
-            result={'status':'applied','path':str(p),'sha256':sha(content),'backup_id':plan_id}
-            c.execute('UPDATE plans SET status=?,receipt=?,idem=? WHERE id=?',
-                      ('applied',json.dumps(result),idempotency_key,plan_id))
-            self._audit(c,'apply',str(p),'APPLIED')
-            c.commit()
-            return result
+                    os.replace(temp, p)
+                if sha(self._read_bounded(p)) != sha(content):
+                    raise Denied('Post-write verification failed; operator recovery required')
+                result = {'status':'applied', 'path':str(p), 'sha256':sha(content), 'backup_id':plan_id}
+                c.execute('UPDATE plans SET status=?,receipt=? WHERE id=?',
+                          ('applied', json.dumps(result), plan_id))
+                self._audit(c, 'apply', path, 'APPLIED')
+                c.commit()
+                return result
+        except BaseException:
+            # Do not permit more work if the filesystem/ledger is indeterminate.
+            with self._db() as c:
+                c.execute("UPDATE settings SET value='1' WHERE name='emergency'")
+                self._audit(c, 'apply', path, 'NEEDS_RECONCILIATION')
+            raise
+        finally:
+            if temp is not None and temp.exists():
+                temp.unlink()
 
     def audits(self, task: str, limit: int=30):
         self._charge(task,'read')
@@ -469,12 +593,69 @@ class Commander:
                            (max(1,min(50,int(limit))),)).fetchall()
         return [{'at':x[0], 'action':x[1], 'path_digest':x[2], 'result':x[3]} for x in rows]
 
+    def review_recovery(self, plan_id: str) -> dict:
+        """Offline operator inspection. Never a model-callable MCP tool."""
+        if os.name == 'nt' and not admin_mode():
+            raise Denied('Administrator console required')
+        with self._db() as c:
+            row = c.execute('SELECT path,expected,content,status FROM plans WHERE id=?',
+                            (plan_id,)).fetchone()
+        if not row or row[3] != 'applying':
+            raise Denied('No unresolved plan with this ID')
+        path, expected, content, _ = row
+        current = sha(self._read_bounded(self._path(path)))
+        backup = self.state / 'backups' / (plan_id + '.bak')
+        backup_valid = bool(backup.is_file() and not backup.is_symlink() and
+                            sha(backup.read_bytes()) == expected)
+        result = 'original' if current == expected else 'applied' if current == sha(content) else 'unknown'
+        return {'plan_id': plan_id, 'file_state': result, 'backup_valid': backup_valid,
+                'requires_operator': True}
+
+    def reconcile_recovery(self, plan_id: str, observed_state: str) -> dict:
+        """Mark an unchanged or verified-replaced file; no file data is overwritten.
+
+        The broker MUST be stopped by the operator while reconciling to avoid
+        accepting a simultaneously running write; documented operational rule.
+        """
+        if os.name == 'nt' and not admin_mode():
+            raise Denied('Administrator console required')
+        if observed_state not in ('original', 'applied'):
+            raise Denied('Explicit expected state required')
+        with self._db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            if c.execute("SELECT value FROM settings WHERE name='emergency'").fetchone() != ('1',):
+                raise Denied('Emergency stop must be set before recovery')
+            row = c.execute('SELECT path,expected,content,idem,status FROM plans WHERE id=?',
+                            (plan_id,)).fetchone()
+            if not row or row[4] != 'applying':
+                raise Denied('No pending recovery')
+            path, expected, content, idem, _ = row
+            actual = sha(self._read_bounded(self._path(path)))
+            if observed_state == 'original' and actual == expected:
+                c.execute("UPDATE plans SET status='aborted' WHERE id=?", (plan_id,))
+                result = {'status':'aborted','file_state':'original'}
+            elif observed_state == 'applied' and actual == sha(content):
+                backup = self.state / 'backups' / (plan_id + '.bak')
+                if not backup.is_file() or backup.is_symlink() or sha(backup.read_bytes()) != expected:
+                    raise Denied('Cannot verify original backup')
+                receipt = {'status':'applied','path':path,'sha256':actual,'backup_id':plan_id}
+                c.execute('UPDATE plans SET status=?,receipt=? WHERE id=?',
+                          ('applied', json.dumps(receipt), plan_id))
+                result = {'status':'applied','file_state':'applied'}
+            else:
+                raise Denied('File state does not match operator decision')
+            self._audit(c, 'operator_reconcile', path, result['status'].upper())
+            c.commit()
+            return result
+
     def emergency(self, stop: bool):
         # This method is for the out-of-band administrative CLI ONLY; never export as MCP tool.
         if os.name == 'nt' and not admin_mode():
             raise Denied('Administrator console required')
         with self._db() as c:
             c.execute('BEGIN IMMEDIATE')
+            if not stop and c.execute("SELECT 1 FROM plans WHERE status='applying' LIMIT 1").fetchone():
+                raise Denied('Cannot resume with unresolved writes; investigate and reconcile offline')
             c.execute("UPDATE settings SET value=? WHERE name='emergency'",('1' if stop else '0',))
             self._audit(c,'emergency','global','STOP' if stop else 'RESUME')
             c.commit()

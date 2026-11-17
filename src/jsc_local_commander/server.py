@@ -1,21 +1,22 @@
-"""MCP stdio facade. Deliberately offers NO shell/process/service tools."""
+"""Unprivileged MCP stdio facade: all requests go through a separate pipe broker."""
 from __future__ import annotations
 import json
 from mcp.server import MCPServer
-from .core import Commander, Denied, Policy
+from .core import Denied
+from .ipc import BrokerClient
 
-mcp = MCPServer('JSC Local Commander (restricted v0.1)')
-_commander = None
+mcp = MCPServer('JSC Local Commander (split broker v0.2)')
+_client = None
 
-def get_commander():
-    global _commander
-    if _commander is None:
-        _commander = Commander(Policy.load())
-    return _commander
+def get_client():
+    global _client
+    if _client is None:
+        _client = BrokerClient()
+    return _client
 
 def invoke(name, *args):
     try:
-        return getattr(get_commander(),name)(*args)
+        return get_client().call(name,*args)
     except Denied as exc:
         return {'error':'POLICY_DENIED','reason':str(exc)}
     except Exception:
@@ -24,12 +25,12 @@ def invoke(name, *args):
 @mcp.tool()
 def get_status() -> dict:
     """Return security mode and emergency-stop state; no arbitrary execution."""
-    return invoke('status')
+    return invoke('get_status')
 
 @mcp.tool()
 def get_system_info(task_id: str) -> dict:
     """Read-only CPU, RAM, OS and workspace disk capacity."""
-    return invoke('system_info',task_id)
+    return invoke('get_system_info',task_id)
 
 @mcp.tool()
 def diagnose_processes(task_id: str, name_fragment: str='', max_results: int=30) -> dict:
@@ -79,5 +80,5 @@ def get_audit_events(task_id: str, limit: int=30) -> dict:
 
 def main():
     # Fail closed BEFORE stdio starts; no stdout logging.
-    get_commander()
+    get_client()
     mcp.run(transport='stdio')

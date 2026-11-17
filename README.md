@@ -1,49 +1,72 @@
-# JSC Local Commander — 제한형 MCP 구현 v0.1
+# JSC Local Commander v0.2 — Security preview
 
-**Status: SECURITY PREVIEW — DO NOT DEPLOY TO PRODUCTION JSCPC YET.**
+**WINDOWS PRODUCTION DEPLOYMENT BLOCKED.** This release implements a split local named-pipe broker, hardens document writes, and adds crash reconciliation. It is **not** a verified Windows sandbox, and **does not** implement general PowerShell, Docker, service mutations or browser/GUI control.
 
-읽기 전용 시스템 진단과 로컬 `stdio` MCP 서버로 **허용된 작업공간의 작은 일반 텍스트 파일만** 조회·검색·변경할 수 있습니다. 범용 PowerShell, 프로세스 실행, 관리자 권한 상승, 서비스 및 Docker 변경, 재귀 삭제, 외부 접속 기능은 **제공하지 않습니다**. 코드·설정·자격증명 파일은 수정할 수 없습니다.
+## Components
 
-## 사용 전 주의
-
-- Windows 10/11에서 별도 **일반 사용자**로 실행하고, 관리자가 고정된 `%ProgramData%\JSCCommander\policy.json` 및 소스 코드에 쓰기 불가 ACL을 적용해야 합니다.
-- `policy.json` 예시: `{"workspace":"D:\\JSC-AI-Workspace","state":"C:\\ProgramData\\JSCCommander\\State"}`. **예시 경로이므로 본인 PC에 존재하는지 확인해야 합니다.** 작업공간과 상태 폴더는 별도의 위치입니다.
-- 설치 계정은 Windows, Program Files, 중요 서비스, Docker Engine Pipe 등에 쓰기 권한이 없어야 합니다. 정책 설정 파일은 관리자만 수정할 수 있어야 합니다.
-- **로컬 MCP는 별도의 OS 보안 격리를 대체하지 못합니다.** 링크/파일 교체 경합, 악성 프로세스, 디스크 오류 등은 Windows VM 시험이 필요합니다.
-- 현재 버전은 관리자 전용 브로커·Job Objects·구조화된 명령 레시피를 **아직 구현하지 않았습니다**. 프로덕션 승인 전까지 실서버에 연결하지 마세요.
-- MCP stdio는 로컬 Codex에서만 호출할 수 있습니다. 이 ChatGPT 웹 대화에 자동 연결되지는 않습니다.
-- 저장소에는 실제 PC IP, 비밀번호, 키 파일, 정책의 실경로를 올리지 마세요.
-
-## 개발 환경 설치
-
-```powershell
-py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[test]"
-.\.venv\Scripts\python.exe -m pytest -q
+```text
+Codex CLI (or other local MCP host)
+      |
+      | stdio, NO filesystem methods in MCP frontend
+      v
+jsc-local-commander serve (unprivileged gateway)
+      |
+      | authenticated local Windows named pipe, no network server
+      v
+jsc-local-commander broker (separate restricted Windows identity)
+      |
+      v
+administrator-defined workspace (TXT / MD / CSV only)
 ```
 
-## 실행
+Broker authentication uses an admin-provisioned, 32-byte random `C:\ProgramData\JSCCommander\gateway.key`; no default key is generated, no remote listener is exposed. **The shared key is authentication, NOT Windows privilege isolation.** The broker identity, filesystem ACLs, installed Python interpreter, dependencies, broker code, parent directories and policy must all be protected against modification by the gateway/AI identity.
 
-설치·ACL 분리·VM 검증 후 로컬 Codex에 stdio 도구로 등록할 수 있습니다.
+## Implemented MCP tools (11)
+
+`get_status`, `get_system_info`, `diagnose_processes`, `diagnose_services`, `list_workspace`, `search_files`, `read_text`, `get_file_info`, `plan_edit`, `apply_edit`, `get_audit_events`.
+
+There is deliberately **no shell**, subprocess execution, process-kill, Windows-service mutation, deletion, Docker or network-access MCP tool. There is no MCP-controlled stop/resume/recovery. Those are reserved for an offline administrator.
+
+## Security properties
+
+- Workspace-only extension allowlist: `.txt`, `.md`, `.csv`. Sensitive names, credential directories, UNC/device prefixes, links/junctions and hard-linked *write targets* are rejected.
+- 256 KiB maximum read/write file size, with bounded FD reads and file identity checks (not a fully race-free Windows path API).
+- Deny-by-default Windows start-up checks: refuse elevated broker and missing/locally writable policy or code location.
+- SHA-256 check, redacted preview, durable `applying` intent, original backup, atomic replacement, post-replacement SHA verification, idempotent receipt.
+- **At most one write in progress**; if the process stops mid-write, persisted `applying` state forces emergency stop at startup. No automatic retry.
+- Persistent actor-hour and task budgets, limited search/time/outputs. Calls from many freshly minted task IDs share the same hourly budget.
+- Offline operator recovery verifies whether the file equals the original or planned hash. Mismatches are never overwritten automatically.
+
+## Setup (ONLY for an isolated Windows test VM)
+
+1. Use two distinct Windows standard accounts: a restricted **broker** account with access to only its workspace and state, and an unprivileged **gateway** account allowed to access only the authentication key. Never run either as SYSTEM or administrator. Disable interactive logon for the broker via administrator-managed policy where appropriate.
+2. Administrator provisions an immutable installation under an ACL-protected directory (e.g., Program Files) including the **Python interpreter and dependencies**. Do not run the broker from a user-writable checkout, `%TEMP%`, Desktop, Downloads, or a writable `.venv`.
+3. Create `%ProgramData%\JSCCommander\policy.json` (administrator-owned, not writable by either account) with *exactly* `{"workspace":"D:\\JSC-AI-Workspace","state":"C:\\ProgramData\\JSCCommander\\State"}`. These are examples, not detected local paths.
+4. Generate 32 cryptographically random bytes as `%ProgramData%\JSCCommander\gateway.key`. Grant **read-only** access to broker and gateway identities; no write/delete/ACL-change rights. Never commit this file. Administrator restricts access to the state folder to the broker account and administrators only; grant no gateway write access to workspace or state.
+5. Independently audit effective Windows access rights, symlinks and inherited ACEs. Run the provided **read-only** `scripts/audit-windows-host.ps1`. It is **only an informational audit**, not a certification or installer. First use a disposable test workspace; do not link it to real JSCPC production folders.
+6. `py -3.11 -m pip install -e ".[test]"` is for **test VMs only**, not the production runtime. Execute `python -m pytest -q` under Windows. The Windows named-pipe round-trip test runs only on Windows.
+7. Start the broker under its separate identity with `python -m jsc_local_commander broker`, then launch the stdio gateway with `python -m jsc_local_commander serve`. Only after VM validation register the gateway with Codex (`codex mcp add ...`).
+
+**Do not reuse the old direct stdio command:** v0.2 requires the separate broker to be running; it intentionally fails closed when the pipe/key cannot be reached.
+
+## Offline recovery (broker must be STOPPED first)
+
+An administrative operator first checks `python -m jsc_local_commander doctor` and the incident ledger, then runs:
 
 ```powershell
-codex mcp add jsc-local-commander -- C:\path\to\repo\.venv\Scripts\python.exe -m jsc_local_commander
+python -m jsc_local_commander review-recovery --plan-id <GUID>
+# Only after verifying the displayed file_state and backup:
+python -m jsc_local_commander reconcile-recovery --plan-id <GUID> --observed-state original
+# OR --observed-state applied (requires a validated backup)
+python -m jsc_local_commander resume
 ```
 
-실제 `policy.json`에 등록된 workspace 내 `.txt`, `.md`, `.csv`만 접근합니다. `get_file_info`의 SHA256을 확인한 뒤 `plan_edit`으로 미리보기를 만들고, `apply_edit`에 고유한 `idempotency_key`를 전달합니다. 동일한 계획의 재실행은 차단하거나 결과만 반환합니다. 사용자에게 저장 경로에 대한 접근 권한이 없다면 운영체제가 거부합니다.
+The recovery command **never writes the target file**. If the current hash is neither original nor planned, do not force reconciliation. Restore manually from a known-good backup, then inspect before restarting. Resume refuses if any unresolved write remains.
 
-### 아직 지원하지 않는 것
+## Constraints and deployment gate
 
-- 임의 PowerShell, Docker, 서비스 관리, UI 조작, 바이너리/DOCX/XLSX 수정
-- 관리자 전용 독립 Policy Broker 및 1회용 관리자 승인
-- Windows Job Object 기반 외부 프로세스 제한(현재 외부 프로세스 실행 자체를 지원하지 않음)
-- 장시간 작업 큐·자동 복구
-- 경로 handle 기반 완전한 TOCTOU 방어
+- Local stdio connection to Codex is not equivalent to ChatGPT web access; this release **does not offer ChatGPT web remote access**.
+- NTFS path racing and alternate data streams require real Windows attack/ACL tests. The broker must run under a truly restricted identity. Even with the broker, other unrestricted MCPs or an unrestricted Codex shell can bypass the broker: enforce OS-level isolation for the **whole AI process**, not only this MCP.
+- Tests passing in CI do not imply the isolation is correct. No Windows production rollout until VM tests, actual identity/ACL verification, file-lock races, named-pipe attack review, kill/reboot drills and restore drills are successful.
 
-안전성 시험: `docs/VALIDATION.md` 참조. **CI 통과만으로 운영환경 안전성이 검증되는 것은 아닙니다.**
-
-## 제공 도구 (v0.1)
-
-`get_status`, `get_system_info`, `diagnose_processes`, `diagnose_services`, `list_workspace`, `search_files`, `read_text`, `get_file_info`, `plan_edit`, `apply_edit`, `get_audit_events` (총 11개). 시스템/프로세스/서비스 진단은 조회 전용입니다.
-
-Windows 운영 경계: 시작 시 정책 파일·설치된 코드 및 상위 폴더가 작업 계정에서 쓰기 불가인지 Win32 API로 검사합니다. 이 검사는 전체 DACL 정밀 감사의 대체가 아니며, 설치 계정 ACL의 독립 검증이 추가로 필요합니다.
+Details: [SECURITY.md](SECURITY.md), [docs/VALIDATION.md](docs/VALIDATION.md), [docs/REVIEW_V02.md](docs/REVIEW_V02.md).

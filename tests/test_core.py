@@ -82,8 +82,7 @@ def test_hardlink_refuses_write(env):
     hard=p.parent/'hard.txt'
     try:os.link(p,hard)
     except OSError: pytest.skip('hardlinks not supported')
-    plan=c.plan_edit('task-hard',str(p),digest(b'before\n'),'after\n')
-    with pytest.raises(Denied):c.apply_edit('task-hard',plan['plan_id'],'unique-key-hard1')
+    with pytest.raises(Denied):c.plan_edit('task-hard',str(p),digest(b'before\n'),'after\n')
 
 def test_plan_expiry(env):
     c,p=env
